@@ -1,0 +1,82 @@
+name: Build for Windows ARM64
+
+on:
+  push:
+    tags:
+    - '*'
+
+jobs:
+  build-windows-arm64:
+    name: Build
+    runs-on: windows-latest
+    env:
+      trojan_version: "1.16.0"
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup devcmd
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64_arm64
+
+      - name: Install build tools
+        run: |
+          choco install ninja
+
+      # use the preinstalled vcpkg from image
+      # https://github.com/actions/virtual-environments/blob/main/images/win/Windows2019-Readme.md#package-management
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v10
+        with:
+          vcpkgDirectory: C:/vcpkg
+          doNotUpdateVcpkg: true  # the preinstalled vcpkg is updated regularly
+
+      - name: Install dependencies from vcpkg
+        run: |
+          # tell vcpkg to only build Release variants of the dependencies
+          $packages = `
+            "openssl:arm64-windows-static-release",
+            "boost-system:arm64-windows-static-release",
+            "boost-asio:arm64-windows-static-release",
+            "boost-property-tree:arm64-windows-static-release",
+            "boost-program-options:arm64-windows-static-release"
+          ${{ env.RUNVCPKG_VCPKG_ROOT }}/vcpkg.exe upgrade `
+            --no-dry-run
+          ${{ env.RUNVCPKG_VCPKG_ROOT }}/vcpkg.exe install `
+            --clean-after-build `
+            $packages
+
+      - name: Build trojan
+        run: |
+          git clone --branch v${{ env.trojan_version }} --depth 1 https://github.com/trojan-gfw/trojan.git
+          cd trojan
+          $cmakelist = Get-Content "CMakeLists.txt"
+          $cmakelist = $cmakelist.replace("if(MSVC)", "if(MSVC)`nadd_compile_options(-MT -D_WIN32_WINNT=0x0A00)") 
+          $cmakelist | Set-Content "CMakeLists.txt"
+          cmake -B build -G "Ninja" -DENABLE_MYSQL=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="${{ env.RUNVCPKG_VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=arm64-windows-static-release
+          cmake --build build
+
+      - name: Prepare build artifacts
+        run: |
+          mkdir upload
+          copy trojan/build/trojan.exe upload
+          copy -r trojan/examples upload
+          copy trojan/LICENSE upload
+          cd upload
+          7z a trojan_${{ env.trojan_version }}_arm64.zip *
+          mv trojan_${{ env.trojan_version }}_arm64.zip ..
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: trojan_${{ env.trojan_version }}_arm64
+          path: upload
+
+      - name: Batch release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          files: trojan_${{ env.trojan_version }}_arm64.zip 
